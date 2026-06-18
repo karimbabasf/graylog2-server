@@ -20,6 +20,7 @@ import { render, screen } from 'wrappedTestingLibrary';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import DefaultProviders from 'DefaultProviders';
 import userEvent from '@testing-library/user-event';
+import { dataRouterFuture } from 'reactRouterFutureFlags';
 
 import Routes from 'routing/Routes';
 import { usePluginExports } from 'views/test/testPlugins';
@@ -44,13 +45,6 @@ const routes = [
   { path: Routes.STARTPAGE, element: <span>Logged out</span> },
   { path: '/loggedin', element: <TestComponent /> },
 ];
-const dataRouterFuture = {
-  v7_relativeSplatPath: true,
-  v7_fetcherPersist: true,
-  v7_normalizeFormMethod: true,
-  v7_partialHydration: true,
-  v7_skipActionErrorRevalidation: true,
-} as const;
 const Wrapper = () => (
   <RouterProvider
     router={createMemoryRouter(routes, {
