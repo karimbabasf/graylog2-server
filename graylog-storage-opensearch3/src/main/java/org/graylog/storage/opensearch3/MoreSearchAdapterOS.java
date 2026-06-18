@@ -21,6 +21,7 @@ import jakarta.inject.Inject;
 import jakarta.inject.Named;
 import org.graylog.events.event.EventDto;
 import org.graylog.events.processor.EventProcessorException;
+import org.graylog.events.search.MitreBackwardsCompatibilityFilter;
 import org.graylog.events.search.MoreSearch;
 import org.graylog.events.search.MoreSearchAdapter;
 import org.graylog.events.search.SourceStreamFilter;
@@ -67,6 +68,7 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -163,7 +165,17 @@ public class MoreSearchAdapterOS implements MoreSearchAdapter {
         boolQuery.filter(timerangeQuery(timerange));
 
 
-        extraFilters.forEach((field, values) -> {
+        final BoolQuery.Builder mitreOr = BoolQuery.builder().minimumShouldMatch("1");
+        if (MitreBackwardsCompatibilityFilter.emitShouldClauses(extraFilters,
+                (k, v) -> mitreOr.should(buildExtraFilter(k, v)))) {
+            boolQuery.filter(Query.of(b -> b.bool(mitreOr.build())));
+        }
+
+        extraFilters.entrySet().stream()
+                .filter(e -> !MitreBackwardsCompatibilityFilter.isMitreKey(e.getKey()))
+                .forEach(e -> {
+            final var field = e.getKey();
+            final var values = e.getValue();
             values.stream()
                     .filter(MoreSearchAdapter::isRangeValue)
                     .map(value -> buildExtraFilter(field, value))
@@ -269,7 +281,7 @@ public class MoreSearchAdapterOS implements MoreSearchAdapter {
             events.add(new MoreSearch.Histogram.Bucket(dateTime, eventCount));
         });
 
-        return new MoreSearch.Histogram(new MoreSearch.Histogram.EventsBuckets(events, alerts));
+        return new MoreSearch.Histogram(new MoreSearch.Histogram.EventsBuckets(events, alerts), timerange);
     }
 
     static Query buildExtraFilter(String field, String value) {
@@ -376,10 +388,17 @@ public class MoreSearchAdapterOS implements MoreSearchAdapter {
     @Override
     public Map<String, Map<String, Long>> aggregateGroupedTerms(String queryString, TimeRange timerange, Set<String> affectedIndices,
                                                                 String groupByField, String termsField,
-                                                                int maxBuckets, int maxSubBuckets) {
+                                                                int maxBuckets, int maxSubBuckets,
+                                                                Collection<String> includeTerms) {
         final var filter = createSimpleQuery(queryString, timerange);
         final var aggregation = Aggregation.builder()
-                .terms(terms -> terms.field(groupByField).size(maxBuckets))
+                .terms(terms -> {
+                    terms.field(groupByField).size(maxBuckets);
+                    if (includeTerms != null && !includeTerms.isEmpty()) {
+                        terms.include(inc -> inc.terms(includeTerms.stream().toList()));
+                    }
+                    return terms;
+                })
                 .aggregations(SUB_TERMS_AGGREGATION_NAME, Aggregation.of(a -> a
                         .terms(t -> t.field(termsField).size(maxSubBuckets))))
                 .build();
@@ -397,10 +416,17 @@ public class MoreSearchAdapterOS implements MoreSearchAdapter {
 
     @Override
     public Map<String, Long> aggregateTerms(String queryString, TimeRange timerange, Set<String> affectedIndices,
-                                            String termsField, int maxBuckets) {
+                                            String termsField, int maxBuckets,
+                                            Collection<String> includeTerms) {
         final var filter = createSimpleQuery(queryString, timerange);
         final var aggregation = Aggregation.builder()
-                .terms(terms -> terms.field(termsField).size(maxBuckets))
+                .terms(terms -> {
+                    terms.field(termsField).size(maxBuckets);
+                    if (includeTerms != null && !includeTerms.isEmpty()) {
+                        terms.include(inc -> inc.terms(includeTerms.stream().toList()));
+                    }
+                    return terms;
+                })
                 .build();
 
         final var searchResult = executeAggregation(filter, affectedIndices, GROUP_BY_AGGREGATION_NAME, aggregation);
@@ -410,14 +436,20 @@ public class MoreSearchAdapterOS implements MoreSearchAdapter {
     @Override
     public Map<String, Double> aggregateGroupedMetric(String queryString, TimeRange timerange, Set<String> affectedIndices,
                                                       String groupByField, AggregationType metricType, String metricField,
-                                                      int maxBuckets) {
+                                                      int maxBuckets, Collection<String> includeTerms) {
         final var filter = createSimpleQuery(queryString, timerange);
         final Aggregation metricAgg = switch (metricType) {
             case AVG -> Aggregation.of(a -> a.avg(avg -> avg.field(metricField)));
             case MAX -> Aggregation.of(a -> a.max(max -> max.field(metricField)));
         };
         final var aggregation = Aggregation.builder()
-                .terms(terms -> terms.field(groupByField).size(maxBuckets))
+                .terms(terms -> {
+                    terms.field(groupByField).size(maxBuckets);
+                    if (includeTerms != null && !includeTerms.isEmpty()) {
+                        terms.include(inc -> inc.terms(includeTerms.stream().toList()));
+                    }
+                    return terms;
+                })
                 .aggregations(METRIC_AGGREGATION_NAME, metricAgg)
                 .build();
 
@@ -477,10 +509,11 @@ public class MoreSearchAdapterOS implements MoreSearchAdapter {
     }
 
     private double extractMetricValue(org.opensearch.client.opensearch._types.aggregations.Aggregate agg, AggregationType metricType) {
-        return switch (metricType) {
+        final Double value = switch (metricType) {
             case AVG -> agg.avg().value();
             case MAX -> agg.max().value();
         };
+        return value != null ? value : 0.0;
     }
 
     private Query createSimpleQuery(String queryString, TimeRange timerange) {
